@@ -1,0 +1,11 @@
+{
+    "service-name1": {
+        "ANTHROPIC_BASE_URL": "https://service1",
+        "ANTHROPIC_AUTH_TOKEN": "sk-1"
+    },
+    "service-name2": {
+        "ANTHROPIC_BASE_URL": "https://service2",
+        "ANTHROPIC_API_KEY": "sk-2",
+        "ANTHROPIC_ANTHROPIC_MODEL": "kimi-k2",
+    }
+}
