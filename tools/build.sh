@@ -2,11 +2,13 @@
 
 # Claude Code Env 多平台构建脚本
 # 使用方法:
-#   ./build.sh         - 为当前系统编译
-#   ./build.sh all     - 编译所有支持的平台
-#   ./build.sh linux   - 只编译 Linux 版本
-#   ./build.sh darwin  - 只编译 macOS 版本
-#   ./build.sh windows - 只编译 Windows 版本
+#   ./tools/build.sh         - 为当前系统编译
+#   ./tools/build.sh all     - 编译所有支持的平台
+#   ./tools/build.sh linux   - 只编译 Linux 版本
+#   ./tools/build.sh darwin  - 只编译 macOS 版本
+#   ./tools/build.sh windows - 只编译 Windows 版本
+#
+# 注意：请在项目根目录下运行此脚本
 
 set -e
 
@@ -18,16 +20,16 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # 项目信息
-APP_NAME="cce"
-VERSION=${VERSION:-"1.0.0"}
+APP_NAME="ccenv"
+VERSION=${VERSION:-"2.0.0"}
 BUILD_DIR="dist"
 
 # 支持的平台和架构（使用普通数组替代关联数组）
 PLATFORMS=(
-    "darwin/amd64:cce-darwin-amd64"
-    "darwin/arm64:cce-darwin-arm64"
-    "linux/amd64:cce-linux-amd64"
-    "windows/amd64:cce-windows-amd64.exe"
+    "darwin/amd64:ccenv-darwin-amd64"
+    "darwin/arm64:ccenv-darwin-arm64"
+    "linux/amd64:ccenv-linux-amd64"
+    "windows/amd64:ccenv-windows-amd64.exe"
 )
 
 # 打印信息
@@ -80,7 +82,7 @@ build_platform() {
     print_info "编译 $platform -> $output"
     
     # 设置环境变量并编译
-    GOOS=$goos GOARCH=$goarch go build -ldflags "-X main.Version=$VERSION" -o "$BUILD_DIR/$output" ./cmd/cce
+    GOOS=$goos GOARCH=$goarch go build -ldflags "-X main.Version=$VERSION" -o "$BUILD_DIR/$output" ./cmd/ccenv
     
     if [ $? -eq 0 ]; then
         print_success "编译完成: $BUILD_DIR/$output"
@@ -171,9 +173,9 @@ build_current() {
     
     if [ $found -eq 1 ]; then
         # 同时创建不带平台后缀的版本
-        local simple_name="cce"
+        local simple_name="ccenv"
         if [ "$current_os" = "windows" ]; then
-            simple_name="cce.exe"
+            simple_name="ccenv.exe"
         fi
         cp "$BUILD_DIR/$output" "$BUILD_DIR/$simple_name"
         print_info "创建当前平台版本: $BUILD_DIR/$simple_name"
@@ -204,7 +206,7 @@ show_help() {
     done
     echo
     echo "环境变量:"
-    echo "  VERSION             设置版本号 (默认: 1.0.0)"
+    echo "  VERSION             设置版本号 (默认: 2.0.0)"
 }
 
 # 清理构建目录
