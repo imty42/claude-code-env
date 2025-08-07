@@ -1,11 +1,31 @@
 {
-    "service-name1": {
-        "ANTHROPIC_BASE_URL": "https://service1",
+  "version": "2.0",
+  "APIKEY": "your-secret-key",
+  "CCENV_HOST": "localhost",
+  "CCENV_PORT": 9999,
+  "API_PROXY": "http://127.0.0.1:7890",
+  "LOGGING_LEVEL": "DEBUG",
+  "API_TIMEOUT_MS": 600000,
+  "providers": [
+    {
+      "name": "provicer-a",
+      "state": "off",
+      "env": {
+        "ANTHROPIC_BASE_URL": "https://api.siliconflow.cn",
         "ANTHROPIC_AUTH_TOKEN": "sk-1"
+      }
     },
-    "service-name2": {
-        "ANTHROPIC_BASE_URL": "https://service2",
+    {
+      "name": "provicer-b",
+      "state": "on",
+      "env": {
+        "ANTHROPIC_BASE_URL": "https://api.siliconflow.cn",
         "ANTHROPIC_API_KEY": "sk-2",
-        "ANTHROPIC_ANTHROPIC_MODEL": "kimi-k2",
+        "ANTHROPIC_MODEL": "deepseek-ai/DeepSeek-V3"
+      }
     }
+  ],
+  "routing": {
+    "strategy": "default"
+  }
 }

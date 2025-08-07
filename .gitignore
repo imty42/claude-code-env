@@ -10,8 +10,8 @@ go.work
 
 # Build output
 dist/
-/cce
-/cce-*
+/ccenv
+/ccenv-*
 
 # IDE
 .vscode/
