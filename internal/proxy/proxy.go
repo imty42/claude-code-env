@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,14 +36,14 @@ func writeAnthropicError(w http.ResponseWriter, statusCode int, errorType, messa
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	
+
 	jsonData, err := json.Marshal(errorResp)
 	if err != nil {
 		// 如果JSON序列化失败，返回基本错误
 		w.Write([]byte(`{"type":"error","error":{"type":"api_error","message":"CCENV 序列化错误响应失败"}}`))
 		return
 	}
-	
+
 	w.Write(jsonData)
 }
 
@@ -50,7 +51,8 @@ func writeAnthropicError(w http.ResponseWriter, statusCode int, errorType, messa
 type ProxyServer struct {
 	server          *http.Server
 	providerManager *provider.ProviderManager
-	port            int // 服务端口
+	host            string // 服务主机
+	port            int    // 服务端口
 	httpClient      *http.Client
 	clientManager   *ClientManager
 }
@@ -67,8 +69,8 @@ type ClientInfo struct {
 	ID         string    `json:"id"`
 	RegisterAt time.Time `json:"register_at"`
 	LastPing   time.Time `json:"last_ping"`
-	PID        int       `json:"pid"`        // 进程ID
-	Hostname   string    `json:"hostname"`   // 主机名
+	PID        int       `json:"pid"`      // 进程ID
+	Hostname   string    `json:"hostname"` // 主机名
 }
 
 // ClientRequest 客户端请求数据结构
@@ -110,7 +112,7 @@ func (cm *ClientManager) SetOnEmptyCallback(callback func()) {
 func (cm *ClientManager) RegisterClient(clientID string, pid int, hostname string) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
-	
+
 	now := time.Now()
 	cm.clients[clientID] = &ClientInfo{
 		ID:         clientID,
@@ -119,8 +121,8 @@ func (cm *ClientManager) RegisterClient(clientID string, pid int, hostname strin
 		PID:        pid,
 		Hostname:   hostname,
 	}
-	
-	logger.Info(logger.ModuleProxy, "客户端生命周期: [注册] %s -> 总数:%d", 
+
+	logger.Info(logger.ModuleProxy, "客户端生命周期: [注册] %s -> 总数:%d",
 		clientID, len(cm.clients))
 }
 
@@ -128,13 +130,13 @@ func (cm *ClientManager) RegisterClient(clientID string, pid int, hostname strin
 func (cm *ClientManager) UpdateHeartbeat(clientID string) bool {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
-	
+
 	if client, exists := cm.clients[clientID]; exists {
 		client.LastPing = time.Now()
 		// 心跳成功不记录日志，避免日志噪音
 		return true
 	}
-	
+
 	logger.Warn(logger.ModuleProxy, "心跳失败: 客户端未注册 %s", clientID)
 	return false
 }
@@ -143,12 +145,12 @@ func (cm *ClientManager) UpdateHeartbeat(clientID string) bool {
 func (cm *ClientManager) UnregisterClient(clientID string) bool {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
-	
+
 	if _, exists := cm.clients[clientID]; exists {
 		delete(cm.clients, clientID)
 		remainingCount := len(cm.clients)
 		logger.Info(logger.ModuleProxy, "客户端生命周期: [注销] %s -> 剩余:%d", clientID, remainingCount)
-		
+
 		// 如果没有客户端了，调用回调函数
 		if remainingCount == 0 && cm.onEmpty != nil {
 			logger.Info(logger.ModuleProxy, "触发自动关闭: 所有客户端已断开")
@@ -156,7 +158,7 @@ func (cm *ClientManager) UnregisterClient(clientID string) bool {
 		}
 		return true
 	}
-	
+
 	logger.Warn(logger.ModuleProxy, "注销失败: 客户端不存在 %s", clientID)
 	return false
 }
@@ -172,51 +174,64 @@ func (cm *ClientManager) GetClientCount() int {
 func (cm *ClientManager) GetAllClients() map[string]*ClientInfo {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
-	
+
 	// 创建副本避免并发问题
 	result := make(map[string]*ClientInfo)
 	for id, client := range cm.clients {
 		clientCopy := *client
 		result[id] = &clientCopy
 	}
-	
+
 	return result
+}
+
+// GetClientInfo 获取特定客户端信息
+func (cm *ClientManager) GetClientInfo(clientID string) *ClientInfo {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+
+	if client, exists := cm.clients[clientID]; exists {
+		clientCopy := *client
+		return &clientCopy
+	}
+
+	return nil
 }
 
 // CleanupInactiveClients 清理非活跃客户端
 func (cm *ClientManager) CleanupInactiveClients(timeout time.Duration) int {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
-	
+
 	now := time.Now()
 	var toRemove []string
-	
+
 	for id, client := range cm.clients {
 		if now.Sub(client.LastPing) > timeout {
 			toRemove = append(toRemove, id)
 		}
 	}
-	
+
 	if len(toRemove) > 0 {
 		for _, id := range toRemove {
 			delete(cm.clients, id)
 		}
-		
-		logger.Info(logger.ModuleProxy, "自动清理: 移除%d个非活跃客户端 -> 剩余:%d", 
+
+		logger.Info(logger.ModuleProxy, "自动清理: 移除%d个非活跃客户端 -> 剩余:%d",
 			len(toRemove), len(cm.clients))
 	}
-	
+
 	// 如果清理后没有客户端了，调用回调函数
 	if len(cm.clients) == 0 && len(toRemove) > 0 && cm.onEmpty != nil {
 		logger.Info(logger.ModuleProxy, "触发自动关闭: 清理后无活跃客户端")
 		go cm.onEmpty()
 	}
-	
+
 	return len(toRemove)
 }
 
 // NewProxyServer 创建新的代理服务器
-func NewProxyServer(providerManager *provider.ProviderManager, port int, apiProxy string) *ProxyServer {
+func NewProxyServer(providerManager *provider.ProviderManager, host string, port int, apiProxy string, timeout time.Duration) *ProxyServer {
 	// 创建带代理配置的 HTTP 客户端
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: false},
@@ -232,39 +247,41 @@ func NewProxyServer(providerManager *provider.ProviderManager, port int, apiProx
 
 	proxy := &ProxyServer{
 		providerManager: providerManager,
+		host:            host,
 		port:            port,
 		httpClient: &http.Client{
 			Transport: transport,
-			Timeout:   30 * time.Second,
+			Timeout:   timeout,
 		},
 		clientManager: NewClientManager(),
 	}
 
 	mux := http.NewServeMux()
-	
+
 	// 注册客户端生命周期管理接口
 	mux.HandleFunc("/ccenv/register", proxy.handleClientRegister)
 	mux.HandleFunc("/ccenv/unregister", proxy.handleClientUnregister)
 	mux.HandleFunc("/ccenv/heartbeat", proxy.handleClientHeartbeat)
 	mux.HandleFunc("/ccenv/status", proxy.handleClientStatus)
-	
+	mux.HandleFunc("/ccenv/client/", proxy.handleClientInfo)
+
 	// 注册特定的 /v1/messages 处理器（保留特殊的模型映射逻辑）
 	mux.HandleFunc("/v1/messages", proxy.handleMessages)
-	
+
 	// 注册通用的 /v1/ 路由处理器（除了 messages）
 	mux.HandleFunc("/v1/", proxy.handleV1Routes)
-	
+
 	// 注册 /health 端点
 	mux.HandleFunc("/health", proxy.handleHealth)
-	
+
 	// 预留 /ui/ 路由用于管理界面
 	mux.HandleFunc("/ui/", proxy.handleUI)
-	
+
 	// 注册 catch-all 处理器用于调试和日志记录
 	mux.HandleFunc("/", proxy.handleCatchAll)
 
 	proxy.server = &http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
+		Addr:    fmt.Sprintf("%s:%d", host, port),
 		Handler: mux,
 	}
 
@@ -397,6 +414,46 @@ func (p *ProxyServer) handleClientHeartbeat(w http.ResponseWriter, r *http.Reque
 	}
 }
 
+// handleClientInfo 处理特定客户端信息查询请求
+func (p *ProxyServer) handleClientInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(ClientResponse{
+			Success: false,
+			Message: "仅支持 GET 请求",
+		})
+		return
+	}
+
+	// 从URL路径中提取客户端ID
+	clientID := strings.TrimPrefix(r.URL.Path, "/ccenv/client/")
+	if clientID == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ClientResponse{
+			Success: false,
+			Message: "客户端ID不能为空",
+		})
+		return
+	}
+
+	// 获取客户端信息
+	client := p.clientManager.GetClientInfo(clientID)
+	if client == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(ClientResponse{
+			Success: false,
+			Message: "客户端未找到",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(client)
+}
+
 // handleClientStatus 处理客户端状态查询请求
 func (p *ProxyServer) handleClientStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
@@ -423,7 +480,7 @@ func (p *ProxyServer) handleClientStatus(w http.ResponseWriter, r *http.Request)
 func (p *ProxyServer) handleMessages(w http.ResponseWriter, r *http.Request) {
 	// 生成请求追踪ID
 	requestID := logger.GenerateRequestID()
-	
+
 	// 只处理 POST 请求
 	if r.Method != "POST" {
 		logger.ErrorWithRequestID(logger.ModuleProxy, requestID, "仅支持 POST 请求")
@@ -487,7 +544,7 @@ func (p *ProxyServer) handleMessages(w http.ResponseWriter, r *http.Request) {
 	// 设置认证头：优先使用ANTHROPIC_AUTH_TOKEN，其次ANTHROPIC_API_KEY
 	authToken := providerState.Provider.Env["ANTHROPIC_AUTH_TOKEN"]
 	apiKey := providerState.Provider.Env["ANTHROPIC_API_KEY"]
-	
+
 	if authToken != "" {
 		// 使用 Authorization header with Bearer prefix
 		proxyReq.Header.Set("Authorization", "Bearer "+authToken)
@@ -530,7 +587,7 @@ func (p *ProxyServer) handleMessages(w http.ResponseWriter, r *http.Request) {
 // modifyRequestModel 修改请求中的模型
 func (p *ProxyServer) modifyRequestModel(bodyBytes []byte, targetModel, providerName string) ([]byte, error) {
 	var requestBody map[string]interface{}
-	
+
 	err := json.Unmarshal(bodyBytes, &requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("解析JSON失败: %v", err)
@@ -546,7 +603,7 @@ func (p *ProxyServer) modifyRequestModel(bodyBytes []byte, targetModel, provider
 
 	// 替换为目标模型
 	requestBody["model"] = targetModel
-	
+
 	if originalModel != "" {
 		if originalModel != targetModel {
 			logger.Info(logger.ModuleProxy, "[%s] 模型映射: %s -> %s", providerName, originalModel, targetModel)
@@ -569,7 +626,7 @@ func (p *ProxyServer) modifyRequestModel(bodyBytes []byte, targetModel, provider
 // logRequestModel 记录请求模型（用于没有模型映射的情况）
 func (p *ProxyServer) logRequestModel(bodyBytes []byte, providerName, requestID string) {
 	var requestBody map[string]interface{}
-	
+
 	err := json.Unmarshal(bodyBytes, &requestBody)
 	if err != nil {
 		logger.DebugWithRequestID(logger.ModuleProxy, requestID, "解析请求体失败，无法获取模型信息: %v", err)
@@ -620,18 +677,18 @@ func (p *ProxyServer) copyResponse(w http.ResponseWriter, resp *http.Response) {
 
 // Start 启动代理服务器
 func (p *ProxyServer) Start() error {
-	logger.Info(logger.ModuleProxy, "启动代理服务器: http://127.0.0.1:%d", p.port)
+	logger.Info(logger.ModuleProxy, "启动代理服务器: http://%s:%d", p.host, p.port)
 	logger.Info(logger.ModuleProxy, "多Provider透明代理模式")
-	
+
 	go func() {
 		if err := p.server.ListenAndServe(); err != http.ErrServerClosed {
 			logger.Error(logger.ModuleProxy, "服务器启动失败: %v", err)
 		}
 	}()
-	
+
 	// 启动客户端清理任务
 	go p.startClientCleanupTask()
-	
+
 	// 等待一小段时间确保服务器启动
 	time.Sleep(100 * time.Millisecond)
 	return nil
@@ -639,20 +696,20 @@ func (p *ProxyServer) Start() error {
 
 // startClientCleanupTask 启动客户端清理任务
 func (p *ProxyServer) startClientCleanupTask() {
-	cleanupTicker := time.NewTicker(60 * time.Second) // 每60秒清理一次
-	statusTicker := time.NewTicker(60 * time.Second)  // 每60秒打印状态
+	cleanupTicker := time.NewTicker(30 * time.Second) // 每30秒清理一次，更及时
+	statusTicker := time.NewTicker(3 * time.Minute)   // 每3分钟打印状态
 	defer cleanupTicker.Stop()
 	defer statusTicker.Stop()
-	
+
 	for {
 		select {
 		case <-cleanupTicker.C:
-			// 清理2分钟内无心跳的客户端
-			cleaned := p.clientManager.CleanupInactiveClients(2 * time.Minute)
+			// 清理300秒（5分钟）内无心跳的客户端
+			cleaned := p.clientManager.CleanupInactiveClients(300 * time.Second)
 			if cleaned > 0 {
 				logger.Info(logger.ModuleProxy, "自动清理了 %d 个非活跃客户端", cleaned)
 			}
-			
+
 		case <-statusTicker.C:
 			// 定期打印客户端状态
 			count := p.clientManager.GetClientCount()
@@ -666,10 +723,10 @@ func (p *ProxyServer) startClientCleanupTask() {
 // Shutdown 关闭代理服务器
 func (p *ProxyServer) Shutdown() error {
 	logger.Info(logger.ModuleProxy, "关闭代理服务器...")
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	
+
 	return p.server.Shutdown(ctx)
 }
 
@@ -745,7 +802,7 @@ func (p *ProxyServer) handleCatchAll(w http.ResponseWriter, r *http.Request) {
 	logger.Debug(logger.ModuleProxy, "请求头: %v", r.Header)
 
 	// 对于未知路径，返回 404
-	writeAnthropicError(w, http.StatusNotFound, "invalid_request_error", 
+	writeAnthropicError(w, http.StatusNotFound, "invalid_request_error",
 		fmt.Sprintf("路径 '%s' 不存在或不被支持", r.URL.Path))
 }
 
@@ -778,7 +835,7 @@ func (p *ProxyServer) forwardRequest(w http.ResponseWriter, r *http.Request, tar
 	// 设置认证头：优先使用ANTHROPIC_AUTH_TOKEN，其次ANTHROPIC_API_KEY
 	authToken := providerState.Provider.Env["ANTHROPIC_AUTH_TOKEN"]
 	apiKey := providerState.Provider.Env["ANTHROPIC_API_KEY"]
-	
+
 	if authToken != "" {
 		// 使用 Authorization header with Bearer prefix
 		proxyReq.Header.Set("Authorization", "Bearer "+authToken)
@@ -825,7 +882,7 @@ func (p *ProxyServer) handleUI(w http.ResponseWriter, r *http.Request) {
 
 	// 设置 HTML 响应头
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	
+
 	// 返回简单的占位页面
 	html := `<!DOCTYPE html>
 <html lang="zh-CN">

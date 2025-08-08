@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -17,8 +18,8 @@ import (
 
 	"github.com/imty42/claude-code-env/internal/config"
 	"github.com/imty42/claude-code-env/internal/logger"
-	"github.com/imty42/claude-code-env/internal/proxy"
 	"github.com/imty42/claude-code-env/internal/provider"
+	"github.com/imty42/claude-code-env/internal/proxy"
 )
 
 // ClientRequest 客户端请求数据结构
@@ -41,35 +42,59 @@ func generateClientID() string {
 	if err != nil {
 		hostname = "unknown"
 	}
-	
+
 	pid := os.Getpid()
 	timestamp := time.Now().Unix()
-	
+
 	return fmt.Sprintf("ccenv_%s_%d_%d", hostname, pid, timestamp)
 }
 
 // sendClientRequest 发送客户端请求到代理服务器
 func sendClientRequest(host string, port int, endpoint string, req ClientRequest) (*ClientResponse, error) {
 	url := fmt.Sprintf("http://%s:%d/ccenv/%s", host, port, endpoint)
-	
+
 	jsonData, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("序列化请求失败: %v", err)
 	}
-	
+
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("发送请求失败: %v", err)
 	}
 	defer resp.Body.Close()
-	
+
 	var clientResp ClientResponse
 	if err := json.NewDecoder(resp.Body).Decode(&clientResp); err != nil {
 		return nil, fmt.Errorf("解析响应失败: %v", err)
 	}
-	
+
 	return &clientResp, nil
+}
+
+// sendClientRequestWithRetry 发送客户端请求到代理服务器（带重试机制）
+func sendClientRequestWithRetry(host string, port int, endpoint string, req ClientRequest, maxRetries int) (*ClientResponse, error) {
+	var lastErr error
+
+	for i := 0; i <= maxRetries; i++ {
+		resp, err := sendClientRequest(host, port, endpoint, req)
+		if err == nil {
+			return resp, nil
+		}
+
+		lastErr = err
+		if i < maxRetries {
+			// 指数退避，最大等待时间30秒
+			waitTime := time.Duration(math.Pow(2, float64(i))) * time.Second
+			if waitTime > 30*time.Second {
+				waitTime = 30 * time.Second
+			}
+			time.Sleep(waitTime)
+		}
+	}
+
+	return nil, fmt.Errorf("发送请求失败，已重试%d次: %v", maxRetries, lastErr)
 }
 
 // registerClient 注册客户端
@@ -78,22 +103,22 @@ func registerClient(host string, port int, clientID string) error {
 	if hostname == "" {
 		hostname = "unknown"
 	}
-	
+
 	req := ClientRequest{
 		ClientID: clientID,
 		PID:      os.Getpid(),
 		Hostname: hostname,
 	}
-	
-	resp, err := sendClientRequest(host, port, "register", req)
+
+	resp, err := sendClientRequestWithRetry(host, port, "register", req, 2)
 	if err != nil {
 		return err
 	}
-	
+
 	if !resp.Success {
 		return fmt.Errorf("注册失败: %s", resp.Message)
 	}
-	
+
 	// 移除重复的注册成功日志，proxy层已经记录了
 	return nil
 }
@@ -104,24 +129,24 @@ func unregisterClient(host string, port int, clientID string) error {
 	if hostname == "" {
 		hostname = "unknown"
 	}
-	
+
 	req := ClientRequest{
 		ClientID: clientID,
 		PID:      os.Getpid(),
 		Hostname: hostname,
 	}
-	
-	resp, err := sendClientRequest(host, port, "unregister", req)
+
+	resp, err := sendClientRequestWithRetry(host, port, "unregister", req, 2)
 	if err != nil {
 		logger.Warn(logger.ModuleExecutor, "注销请求失败: %v", err)
 		return err
 	}
-	
+
 	if !resp.Success {
 		logger.Warn(logger.ModuleExecutor, "注销失败: %s", resp.Message)
 		return fmt.Errorf("注销失败: %s", resp.Message)
 	}
-	
+
 	// 移除重复的注销成功日志，proxy层已经记录了
 	return nil
 }
@@ -132,34 +157,50 @@ func startHeartbeat(host string, port int, clientID string, stopChan <-chan bool
 	if hostname == "" {
 		hostname = "unknown"
 	}
-	
+
 	req := ClientRequest{
 		ClientID: clientID,
 		PID:      os.Getpid(),
 		Hostname: hostname,
 	}
-	
-	ticker := time.NewTicker(30 * time.Second) // 每30秒发送一次心跳
+
+	// 每90秒发送一次心跳（在5分钟超时时间内至少有3次心跳机会）
+	ticker := time.NewTicker(90 * time.Second)
 	defer ticker.Stop()
-	
+
+	// 发送初始心跳
+	sendHeartbeat := func() {
+		resp, err := sendClientRequestWithRetry(host, port, "heartbeat", req, 2)
+		if err != nil {
+			logger.Warn(logger.ModuleExecutor, "心跳请求失败: %v", err)
+			// 如果心跳请求失败，可能是网络问题或服务端问题，尝试重新注册
+			if err := registerClient(host, port, clientID); err != nil {
+				logger.Error(logger.ModuleExecutor, "重新注册失败: %v", err)
+			}
+			return
+		}
+
+		if !resp.Success {
+			logger.Warn(logger.ModuleExecutor, "心跳失败: %s", resp.Message)
+			// 如果心跳失败，可能是客户端未注册，尝试重新注册
+			if err := registerClient(host, port, clientID); err != nil {
+				logger.Error(logger.ModuleExecutor, "重新注册失败: %v", err)
+			}
+			return
+		}
+
+		// 心跳成功时记录详细信息，便于调试
+		logger.Debug(logger.ModuleExecutor, "心跳发送成功: 客户端 %s", clientID)
+	}
+
+	// 立即发送一次心跳
+	sendHeartbeat()
+
 	for {
 		select {
 		case <-ticker.C:
-			resp, err := sendClientRequest(host, port, "heartbeat", req)
-			if err != nil {
-				logger.Warn(logger.ModuleExecutor, "心跳请求失败: %v", err)
-				continue
-			}
-			
-			if !resp.Success {
-				logger.Warn(logger.ModuleExecutor, "心跳失败: %s", resp.Message)
-				// 如果心跳失败，可能是客户端未注册，尝试重新注册
-				if err := registerClient(host, port, clientID); err != nil {
-					logger.Error(logger.ModuleExecutor, "重新注册失败: %v", err)
-				}
-			}
-			// 心跳成功时不记录日志，避免噪音
-			
+			sendHeartbeat()
+
 		case <-stopChan:
 			logger.Debug(logger.ModuleExecutor, "心跳服务已停止")
 			return
@@ -194,17 +235,17 @@ func StartProxyService() error {
 			fmt.Printf("  2. 或使用 'lsof -i :%d' 查找并停止占用进程\n", cfg.CCEnvPort)
 			return fmt.Errorf("端口 %d 已被占用", cfg.CCEnvPort)
 		}
-		
+
 		// 无论是否为 ccenv 进程，start 命令都应该报错（避免重复启动）
 		logger.Error(logger.ModuleExecutor, "端口 %d 已被进程占用 (PID: %d, 进程: %s)", cfg.CCEnvPort, process.PID, process.Name)
-		
+
 		fmt.Printf("\n错误: 端口 %d 已被占用，无法启动代理服务\n\n", cfg.CCEnvPort)
 		fmt.Printf("占用进程信息:\n")
 		fmt.Printf("  PID: %d\n", process.PID)
 		fmt.Printf("  进程: %s\n", process.Name)
 		fmt.Printf("  命令: %s\n", process.Command)
 		fmt.Printf("  用户: %s\n\n", process.User)
-		
+
 		if isCCEnvProcess(process) {
 			fmt.Printf("提示: 检测到已有 ccenv 进程在运行\n")
 			fmt.Printf("  - 使用 'ccenv code' 复用现有代理服务\n")
@@ -214,7 +255,7 @@ func StartProxyService() error {
 			fmt.Printf("  1. 修改配置文件 ~/.claude-code-env/settings.json 中的 CCENV_PORT 为其他端口\n")
 			fmt.Printf("  2. 或停止占用进程: kill %d\n", process.PID)
 		}
-		
+
 		return fmt.Errorf("端口 %d 已被占用", cfg.CCEnvPort)
 	}
 
@@ -236,8 +277,10 @@ func StartProxyService() error {
 	providerManager := provider.NewProviderManager(cfg)
 	proxyServer := proxy.NewProxyServer(
 		providerManager,
+		cfg.CCEnvHost,
 		cfg.CCEnvPort,
 		cfg.APIProxy,
+		time.Duration(cfg.APITimeoutMS)*time.Millisecond,
 	)
 
 	err = proxyServer.Start()
@@ -246,7 +289,7 @@ func StartProxyService() error {
 	}
 
 	logger.Info(logger.ModuleExecutor, "透明代理服务已启动，按 Ctrl+C 停止")
-	
+
 	// 6. 监听信号和配置变化
 	sigChan := make(chan os.Signal, 1)
 	shutdownChan := make(chan bool, 1)
@@ -287,7 +330,7 @@ func StartProxyService() error {
 
 		case newConfig := <-configWatcher.GetReloadChan():
 			logger.Info(logger.ModuleExecutor, "检测到配置文件变化，重启代理服务...")
-			
+
 			// 关闭旧服务
 			err = proxyServer.Shutdown()
 			if err != nil {
@@ -306,8 +349,10 @@ func StartProxyService() error {
 			providerManager = provider.NewProviderManager(newConfig)
 			proxyServer = proxy.NewProxyServer(
 				providerManager,
+				newConfig.CCEnvHost,
 				newConfig.CCEnvPort,
 				newConfig.APIProxy,
+				time.Duration(newConfig.APITimeoutMS)*time.Millisecond,
 			)
 
 			err = proxyServer.Start()
@@ -353,7 +398,7 @@ func getPortProcess(host string, port int) (*PortProcess, error) {
 				if err != nil {
 					continue
 				}
-				
+
 				return &PortProcess{
 					PID:     pid,
 					Name:    fields[0],
@@ -363,7 +408,7 @@ func getPortProcess(host string, port int) (*PortProcess, error) {
 			}
 		}
 	}
-	
+
 	return nil, fmt.Errorf("未找到占用端口 %d 的进程", port)
 }
 
@@ -378,7 +423,7 @@ func getPortProcessByNetstat(port int) (*PortProcess, error) {
 	// 解析 netstat 输出，查找监听指定端口的进程
 	lines := strings.Split(string(output), "\n")
 	portPattern := fmt.Sprintf(":%d ", port)
-	
+
 	for _, line := range lines {
 		if strings.Contains(line, portPattern) && strings.Contains(line, "LISTEN") {
 			// 提取进程信息
@@ -389,7 +434,7 @@ func getPortProcessByNetstat(port int) (*PortProcess, error) {
 				if err != nil {
 					continue
 				}
-				
+
 				return &PortProcess{
 					PID:     pid,
 					Name:    matches[2],
@@ -399,7 +444,7 @@ func getPortProcessByNetstat(port int) (*PortProcess, error) {
 			}
 		}
 	}
-	
+
 	return nil, fmt.Errorf("未找到占用端口 %d 的进程", port)
 }
 
@@ -426,11 +471,11 @@ func isCCEnvProcess(process *PortProcess) bool {
 	if process == nil {
 		return false
 	}
-	
+
 	// 检查进程名或命令中是否包含 ccenv
 	name := strings.ToLower(process.Name)
 	command := strings.ToLower(process.Command)
-	
+
 	return strings.Contains(name, "ccenv") || strings.Contains(command, "ccenv")
 }
 
@@ -461,10 +506,10 @@ func ExecuteClaudeWithProxy(args []string) error {
 
 	// 生成客户端ID
 	clientID := generateClientID()
-	
+
 	// 3. 检测端口占用情况并注册客户端
 	proxyExists := isPortInUse(cfg.CCEnvHost, cfg.CCEnvPort)
-	
+
 	if proxyExists {
 		// 端口被占用，获取占用进程信息
 		process, err := getPortProcess(cfg.CCEnvHost, cfg.CCEnvPort)
@@ -473,11 +518,11 @@ func ExecuteClaudeWithProxy(args []string) error {
 			logger.Error(logger.ModuleExecutor, "端口 %d 已被占用，但无法获取进程信息: %v", cfg.CCEnvPort, err)
 			return fmt.Errorf("端口 %d 已被占用，请检查并处理占用进程", cfg.CCEnvPort)
 		}
-		
+
 		if isCCEnvProcess(process) {
 			// 是 ccenv 进程，可以复用，注册客户端
 			logger.Info(logger.ModuleExecutor, "检测到端口 %d 已被 ccenv 进程占用 (PID: %d)，复用现有代理服务", cfg.CCEnvPort, process.PID)
-			
+
 			// 尝试注册客户端到现有服务器
 			if err := registerClient(cfg.CCEnvHost, cfg.CCEnvPort, clientID); err != nil {
 				logger.Warn(logger.ModuleExecutor, "注册到现有代理服务失败: %v，将启动新的代理服务", err)
@@ -497,7 +542,7 @@ func ExecuteClaudeWithProxy(args []string) error {
 			fmt.Printf("解决方案:\n")
 			fmt.Printf("  1. 修改配置文件 ~/.claude-code-env/settings.json 中的 CCENV_PORT 为其他端口\n")
 			fmt.Printf("  2. 或停止占用进程: kill %d\n", process.PID)
-			
+
 			return fmt.Errorf("端口冲突，需要用户处理")
 		}
 	}
@@ -530,8 +575,10 @@ func ExecuteClaudeWithProxy(args []string) error {
 		providerManager := provider.NewProviderManager(cfg)
 		proxyServer = proxy.NewProxyServer(
 			providerManager,
+			cfg.CCEnvHost,
 			cfg.CCEnvPort,
 			cfg.APIProxy,
+			time.Duration(cfg.APITimeoutMS)*time.Millisecond,
 		)
 
 		err = proxyServer.Start()
@@ -541,7 +588,7 @@ func ExecuteClaudeWithProxy(args []string) error {
 
 		// 确保代理服务器在程序退出时关闭
 		defer proxyServer.Shutdown()
-		
+
 		// 注册客户端到新启动的代理服务器
 		if err := registerClient(cfg.CCEnvHost, cfg.CCEnvPort, clientID); err != nil {
 			logger.Warn(logger.ModuleExecutor, "注册到新启动的代理服务失败: %v", err)
@@ -555,7 +602,7 @@ func ExecuteClaudeWithProxy(args []string) error {
 				select {
 				case newConfig := <-configWatcher.GetReloadChan():
 					logger.Info(logger.ModuleExecutor, "检测到配置文件变化，重启代理服务...")
-					
+
 					// 关闭旧服务
 					err := proxyServer.Shutdown()
 					if err != nil {
@@ -574,8 +621,10 @@ func ExecuteClaudeWithProxy(args []string) error {
 					providerManager = provider.NewProviderManager(newConfig)
 					proxyServer = proxy.NewProxyServer(
 						providerManager,
+						newConfig.CCEnvHost,
 						newConfig.CCEnvPort,
 						newConfig.APIProxy,
+						time.Duration(newConfig.APITimeoutMS)*time.Millisecond,
 					)
 
 					err = proxyServer.Start()
@@ -601,7 +650,7 @@ func ExecuteClaudeWithProxy(args []string) error {
 	defer func() {
 		// 停止心跳
 		close(heartbeatStopChan)
-		
+
 		// 注销客户端
 		if err := unregisterClient(cfg.CCEnvHost, cfg.CCEnvPort, clientID); err != nil {
 			logger.Warn(logger.ModuleExecutor, "客户端注销失败: %v", err)
@@ -674,7 +723,7 @@ func ShowConfig() error {
 
 	// 显示配置信息
 	cfg.DisplayConfig()
-	
+
 	return nil
 }
 
@@ -685,7 +734,7 @@ func ExecuteClaudeWithConfig(serviceConfig config.ServiceConfig, verbose bool) e
 	if shell == "" {
 		shell = "/bin/zsh" // 默认使用 zsh
 	}
-	
+
 	// 构建命令：先加载配置文件，然后执行 claude
 	// 使用 -i 确保是交互式 shell，这样能正确加载 alias
 	cmdStr := "source ~/.zshrc && claude"
@@ -715,27 +764,27 @@ func ExecuteClaudeWithConfig(serviceConfig config.ServiceConfig, verbose bool) e
 
 	// 执行命令并等待结束
 	err := cmd.Run()
-	
+
 	// 处理不同的退出状态
 	if err != nil {
 		if exitError, ok := err.(*exec.ExitError); ok {
 			exitCode := exitError.ExitCode()
-			
+
 			// 127: 命令未找到 - 需要报告错误
 			if exitCode == 127 {
 				return fmt.Errorf("claude 命令未找到，请确保 Claude Code 已正确安装")
 			}
-			
+
 			// 1, 2, 130: 用户主动退出 (Ctrl+C, 正常退出等) - 静默处理
 			if exitCode == 1 || exitCode == 2 || exitCode == 130 {
 				return nil
 			}
-			
+
 			// 其他非零退出码 - 报告错误但提供更友好的信息
 			return fmt.Errorf("claude 命令异常退出 (退出码: %d)", exitCode)
 		}
 	}
-	
+
 	return err
 }
 
@@ -747,23 +796,23 @@ func ShowLogs(args []string) error {
 	if err != nil {
 		return fmt.Errorf("获取用户主目录失败: %v", err)
 	}
-	
+
 	logPath := fmt.Sprintf("%s/.claude-code-env/ccenv.log", homeDir)
-	
+
 	// 2. 检查文件是否存在
 	if _, err := os.Stat(logPath); os.IsNotExist(err) {
 		return fmt.Errorf("日志文件不存在: %s\n提示：请先运行 'ccenv start' 或 'ccenv code' 生成日志", logPath)
 	}
-	
+
 	// 3. 构建命令：tail [用户参数...] 日志文件路径
 	cmdArgs := append(args, logPath)
 	cmd := exec.Command("tail", cmdArgs...)
-	
+
 	// 4. 设置标准输入、输出和错误
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout  
+	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	
+
 	// 5. 执行命令
 	return cmd.Run()
 }

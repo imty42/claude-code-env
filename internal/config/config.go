@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,22 +29,22 @@ type Routing struct {
 
 // Config 表示配置文件结构
 type Config struct {
-	Version        string     `json:"version"`
-	APIKey         string     `json:"APIKEY"`
-	CCEnvHost      string     `json:"CCENV_HOST"`
-	CCEnvPort      int        `json:"CCENV_PORT"`
-	APIProxy       string     `json:"API_PROXY"`
-	LoggingLevel   string     `json:"LOGGING_LEVEL"`
-	APITimeoutMS   int        `json:"API_TIMEOUT_MS"`
-	Providers      []Provider `json:"providers"`
-	Routing        Routing    `json:"routing"`
+	Version      string     `json:"version"`
+	APIKey       string     `json:"APIKEY"`
+	CCEnvHost    string     `json:"CCENV_HOST"`
+	CCEnvPort    int        `json:"CCENV_PORT"`
+	APIProxy     string     `json:"API_PROXY"`
+	LoggingLevel string     `json:"LOGGING_LEVEL"`
+	APITimeoutMS int        `json:"API_TIMEOUT_MS"`
+	Providers    []Provider `json:"providers"`
+	Routing      Routing    `json:"routing"`
 }
 
 // ExampleConfig 硬编码的示例配置
 const ExampleConfig = `{
     "version": "2.0",
     "APIKEY": "your-secret-key",
-    "CCENV_HOST": "localhost", 
+    "CCENV_HOST": "127.0.0.1", 
     "CCENV_PORT": 9999,
     "API_PROXY": "http://127.0.0.1:7890",
     "LOGGING_LEVEL": "DEBUG",
@@ -79,9 +80,9 @@ func LoadConfig() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("获取用户主目录失败: %v", err)
 	}
-	
+
 	configPath := filepath.Join(homeDir, ".claude-code-env", "settings.json")
-	
+
 	// 检查配置文件是否存在
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		return nil, fmt.Errorf("配置文件不存在")
@@ -106,26 +107,62 @@ func LoadConfig() (*Config, error) {
 	return &config, nil
 }
 
+// isValidHost 验证主机地址是否合理（IP地址或合法域名）
+func isValidHost(host string) bool {
+	// 检查是否为有效的 IP 地址
+	if ip := net.ParseIP(host); ip != nil {
+		return true
+	}
+
+	// 检查是否为合法的域名
+	// 简单验证：长度合理，不含非法字符
+	if len(host) > 0 && len(host) <= 253 {
+		// 允许 localhost、域名等
+		if host == "localhost" || strings.Contains(host, ".") {
+			return true
+		}
+		// 允许简单的单词主机名
+		for _, char := range host {
+			if !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+				(char >= '0' && char <= '9') || char == '-') {
+				return false
+			}
+		}
+		return true
+	}
+
+	return false
+}
+
+// isValidPort 验证端口是否在合理范围内
+func isValidPort(port int) bool {
+	return port >= 1024 && port <= 65535
+}
+
 // SetDefaults 设置默认值
 func (c *Config) SetDefaults() {
-	if c.CCEnvHost == "" {
-		c.CCEnvHost = "localhost"
+	// 验证和设置 CCENV_HOST
+	if c.CCEnvHost == "" || !isValidHost(c.CCEnvHost) {
+		c.CCEnvHost = "127.0.0.1"
 	}
-	if c.CCEnvPort == 0 {
+
+	// 验证和设置 CCENV_PORT
+	if c.CCEnvPort == 0 || !isValidPort(c.CCEnvPort) {
 		c.CCEnvPort = 9999
 	}
+
 	if c.LoggingLevel == "" {
 		c.LoggingLevel = "INFO"
 	}
 	if c.APITimeoutMS == 0 {
 		c.APITimeoutMS = 600000 // 10 分钟
 	}
-	
+
 	// 验证并设置路由策略
 	if c.Routing.Strategy != "default" && c.Routing.Strategy != "robin" {
 		c.Routing.Strategy = "default"
 	}
-	
+
 	// 验证 API_PROXY 格式
 	if c.APIProxy != "" {
 		if !strings.HasPrefix(c.APIProxy, "http://") && !strings.HasPrefix(c.APIProxy, "https://") {
@@ -162,7 +199,7 @@ func NewConfigWatcher() (*ConfigWatcher, error) {
 	}
 
 	configPath := filepath.Join(homeDir, ".claude-code-env", "settings.json")
-	
+
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, fmt.Errorf("创建文件监控器失败: %v", err)
@@ -189,21 +226,21 @@ func (cw *ConfigWatcher) Start() error {
 	}
 
 	go cw.watchLoop()
-	
+
 	return nil
 }
 
 // watchLoop 监控循环
 func (cw *ConfigWatcher) watchLoop() {
 	var lastReloadTime time.Time
-	
+
 	for {
 		select {
 		case event, ok := <-cw.watcher.Events:
 			if !ok {
 				return
 			}
-			
+
 			// 只关心配置文件的写入事件
 			if event.Name == cw.configPath && (event.Has(fsnotify.Write) || event.Has(fsnotify.Create)) {
 				// 防止短时间内多次重载
@@ -211,17 +248,17 @@ func (cw *ConfigWatcher) watchLoop() {
 					continue
 				}
 				lastReloadTime = time.Now()
-				
+
 				// 稍等片刻确保文件写入完成
 				time.Sleep(100 * time.Millisecond)
-				
+
 				// 尝试重新加载配置
 				newConfig, err := LoadConfig()
 				if err != nil {
 					cw.errorChan <- fmt.Errorf("重新加载配置失败: %v", err)
 					continue
 				}
-				
+
 				// 发送新配置
 				select {
 				case cw.reloadChan <- newConfig:
@@ -230,13 +267,13 @@ func (cw *ConfigWatcher) watchLoop() {
 					// 如果通道已满，跳过这次更新
 				}
 			}
-			
+
 		case err, ok := <-cw.watcher.Errors:
 			if !ok {
 				return
 			}
 			cw.errorChan <- fmt.Errorf("文件监控错误: %v", err)
-			
+
 		case <-cw.stopChan:
 			return
 		}
@@ -264,12 +301,12 @@ func maskSensitiveValue(value string) string {
 	if value == "" {
 		return ""
 	}
-	
+
 	if len(value) <= 8 {
 		// 短值全部打码
 		return strings.Repeat("*", len(value))
 	}
-	
+
 	// 长值保留前4位和后4位
 	return value[:4] + strings.Repeat("*", len(value)-8) + value[len(value)-4:]
 }
@@ -282,20 +319,20 @@ func (c *Config) DisplayConfig() {
 	fmt.Printf("代理端口: %d\n", c.CCEnvPort)
 	fmt.Printf("日志级别: %s\n", c.LoggingLevel)
 	fmt.Printf("API超时: %dms\n", c.APITimeoutMS)
-	
+
 	if c.APIProxy != "" {
 		fmt.Printf("API代理: %s\n", c.APIProxy)
 	} else {
 		fmt.Printf("API代理: 未配置\n")
 	}
-	
+
 	fmt.Printf("路由策略: %s\n", c.Routing.Strategy)
-	
+
 	fmt.Printf("\n=== Provider 配置 (%d个) ===\n", len(c.Providers))
 	for i, provider := range c.Providers {
 		fmt.Printf("\n[%d] %s\n", i+1, provider.Name)
 		fmt.Printf("  状态: %s\n", provider.State)
-		
+
 		// 显示环境变量
 		fmt.Printf("  环境变量:\n")
 		for key, value := range provider.Env {
@@ -307,7 +344,7 @@ func (c *Config) DisplayConfig() {
 			}
 		}
 	}
-	
+
 	// 显示活跃的providers
 	activeProviders := c.GetActiveProviders()
 	fmt.Printf("\n=== 当前活跃的 Providers (%d个) ===\n", len(activeProviders))
@@ -320,7 +357,7 @@ func (c *Config) DisplayConfig() {
 		}
 		fmt.Printf("- %s (认证方式: %s)\n", provider.Name, authType)
 	}
-	
+
 	fmt.Println("\n=== 配置文件路径 ===")
 	homeDir, _ := os.UserHomeDir()
 	configPath := filepath.Join(homeDir, ".claude-code-env", "settings.json")

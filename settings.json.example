@@ -1,7 +1,7 @@
 {
   "version": "2.0",
   "APIKEY": "your-secret-key",
-  "CCENV_HOST": "localhost",
+  "CCENV_HOST": "127.0.0.1",
   "CCENV_PORT": 9999,
   "API_PROXY": "http://127.0.0.1:7890",
   "LOGGING_LEVEL": "DEBUG",

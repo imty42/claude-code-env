@@ -38,9 +38,9 @@ var levelValues = map[string]LogLevel{
 
 // Logger 统一日志系统
 type Logger struct {
-	level    LogLevel
-	output   *log.Logger
-	logFile  *os.File
+	level   LogLevel
+	output  *log.Logger
+	logFile *os.File
 }
 
 var globalLogger *Logger
@@ -60,7 +60,7 @@ func InitLogger(levelStr string) error {
 	}
 
 	logPath := filepath.Join(homeDir, ".claude-code-env", "ccenv.log")
-	
+
 	// 确保目录存在
 	err = os.MkdirAll(filepath.Dir(logPath), 0755)
 	if err != nil {
@@ -148,7 +148,7 @@ func LogHTTPRequest(requestID, method, path string, statusCode int, duration tim
 		return
 	}
 
-	logLine := fmt.Sprintf("[DEBUG] %s [%s] [%s] %s %s -> %d (%v)", 
+	logLine := fmt.Sprintf("[DEBUG] %s [%s] [%s] %s %s -> %d (%v)",
 		ModuleProxy, provider, requestID, method, path, statusCode, duration)
 
 	if globalLogger != nil {

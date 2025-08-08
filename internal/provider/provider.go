@@ -40,14 +40,14 @@ func NewProviderManager(cfg *config.Config) *ProviderManager {
 		// 验证认证配置
 		authToken := provider.Env["ANTHROPIC_AUTH_TOKEN"]
 		apiKey := provider.Env["ANTHROPIC_API_KEY"]
-		
+
 		// 如果两个都没有配置，标记为失效
 		isDisabled := provider.State != "on"
 		if authToken == "" && apiKey == "" {
 			isDisabled = true
 			logger.Warn(logger.ModuleProvider, "Provider %s 缺少认证配置(ANTHROPIC_AUTH_TOKEN或ANTHROPIC_API_KEY)，已禁用", provider.Name)
 		}
-		
+
 		ps := &ProviderState{
 			Provider:     provider,
 			FailureCount: 0,
@@ -57,7 +57,7 @@ func NewProviderManager(cfg *config.Config) *ProviderManager {
 	}
 
 	logger.Info(logger.ModuleProvider, "初始化 ProviderManager，策略: %s，providers 数量: %d", pm.routingStrategy, len(pm.providers))
-	
+
 	// 展示每个 provider 的状态
 	for _, ps := range pm.providers {
 		status := ps.Provider.State
@@ -66,7 +66,7 @@ func NewProviderManager(cfg *config.Config) *ProviderManager {
 		}
 		logger.Info(logger.ModuleProvider, "Provider: %s, State: %s", ps.Provider.Name, status)
 	}
-	
+
 	return pm
 }
 
@@ -103,7 +103,7 @@ func (pm *ProviderManager) RecordFailure(providerName string) {
 		if ps.Provider.Name == providerName {
 			ps.FailureCount++
 			ps.LastFailureTime = time.Now()
-			
+
 			logger.Warn(logger.ModuleProvider, "Provider %s 失败，累计失败次数: %d", providerName, ps.FailureCount)
 
 			// 如果失败次数达到 5 次，禁用 5 分钟
@@ -136,7 +136,7 @@ func (pm *ProviderManager) RecordSuccess(providerName string) {
 // updateProviderStates 更新所有 provider 状态（检查是否可以恢复）
 func (pm *ProviderManager) updateProviderStates() {
 	now := time.Now()
-	
+
 	for _, ps := range pm.providers {
 		// 检查被禁用的 provider 是否可以恢复
 		if ps.IsDisabled && !ps.DisabledUntil.IsZero() && now.After(ps.DisabledUntil) {
@@ -151,14 +151,14 @@ func (pm *ProviderManager) updateProviderStates() {
 // getAvailableProviders 获取所有可用的 providers
 func (pm *ProviderManager) getAvailableProviders() []*ProviderState {
 	var available []*ProviderState
-	
+
 	for _, ps := range pm.providers {
 		// Provider 必须配置为 "on" 且未被禁用
 		if ps.Provider.State == "on" && !ps.IsDisabled {
 			available = append(available, ps)
 		}
 	}
-	
+
 	return available
 }
 
@@ -181,7 +181,7 @@ func (pm *ProviderManager) getNextDefault(availableProviders []*ProviderState) *
 			}
 		}
 	}
-	
+
 	// 理论上不会到这里，因为 availableProviders 不为空
 	return availableProviders[0]
 }
@@ -200,12 +200,12 @@ func (pm *ProviderManager) getNextRobin(availableProviders []*ProviderState) *Pr
 		}
 		return availableProviders[0]
 	}
-	
+
 	// 更新轮询索引
 	pm.robinIndex = pm.robinIndex % len(availableProviders)
 	selected := availableProviders[pm.robinIndex]
 	pm.robinIndex++
-	
+
 	// 只在 provider 切换时记录日志
 	if pm.lastSelected != selected.Provider.Name {
 		prevProvider := pm.lastSelected
@@ -222,23 +222,23 @@ func (pm *ProviderManager) getNextRobin(availableProviders []*ProviderState) *Pr
 func (pm *ProviderManager) GetProviderStatus() []map[string]interface{} {
 	pm.mutex.RLock()
 	defer pm.mutex.RUnlock()
-	
+
 	var status []map[string]interface{}
-	
+
 	for _, ps := range pm.providers {
 		s := map[string]interface{}{
-			"name":         ps.Provider.Name,
-			"state":        ps.Provider.State,
+			"name":          ps.Provider.Name,
+			"state":         ps.Provider.State,
 			"failure_count": ps.FailureCount,
-			"is_disabled":  ps.IsDisabled,
+			"is_disabled":   ps.IsDisabled,
 		}
-		
+
 		if !ps.DisabledUntil.IsZero() {
 			s["disabled_until"] = ps.DisabledUntil.Format("2006-01-02 15:04:05")
 		}
-		
+
 		status = append(status, s)
 	}
-	
+
 	return status
 }
