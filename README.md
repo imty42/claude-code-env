@@ -1,13 +1,18 @@
-# Claude Code Env 2.0
+# Claude Code Env 2.1
 
-Claude Code 的智能代理启动器，提供透明代理、多provider支持、自动故障切换等实用功能。
+Claude Code 的智能代理启动器，提供透明代理、多provider支持、双端口服务架构。
 
 ## ✨ 核心特性
 
 ### 🔄 透明代理模式
-- 自动启动HTTP代理服务器，无缝接管Claude Code API请求
+- 自动启动LLM API代理服务器，无缝接管Claude Code API请求
 - 支持模型映射，将请求模型自动转换为目标服务商支持的模型
 - 完全兼容Claude Code原生体验
+
+### 🌐 双端口架构
+- **LLM API服务** - 端口9999，处理所有LLM API请求和健康检查
+- **管理服务** - 端口9998，提供Web管理界面
+- **服务路由管理器** - 统一管理两个服务的生命周期，故障隔离
 
 ### 🎯 多Provider支持
 - 支持配置多个API服务商（如SiliconFlow、官方API等）
@@ -24,13 +29,6 @@ Claude Code 的智能代理启动器，提供透明代理、多provider支持、
 - 请求时间监控和provider使用统计
 - 详细的错误信息和故障诊断
 - **请求追踪ID** - 每个请求分配唯一ID，便于故障排查
-- **客户端生命周期监控** - 实时追踪连接的客户端数量和状态
-
-### 🔧 客户端管理
-- **自动注册机制** - 客户端启动时自动向代理服务注册
-- **心跳监控** - 定期心跳检测，确保客户端连接状态
-- **自动清理** - 非活跃客户端自动清理，释放资源
-- **智能关闭** - 所有客户端断开后自动关闭代理服务，节省系统资源
 
 ### ⚡ 热重载
 - 配置文件修改自动检测，无需重启服务
@@ -50,18 +48,6 @@ go build -o ccenv ./cmd/ccenv
 ### 基础用法
 
 ```bash
-# 启动Claude Code交互模式（推荐）
-./ccenv code
-
-# 启动Claude Code并传递初始消息
-./ccenv code "分析这个项目"
-
-# 启动Claude Code并传递Claude参数
-./ccenv code --help
-./ccenv code --resume
-
-# 支持管道输入
-echo "代码内容" | ./ccenv code "请分析这段代码"
 
 # 启动代理服务（测试用）
 ./ccenv start
@@ -71,23 +57,8 @@ echo "代码内容" | ./ccenv code "请分析这段代码"
 
 # 查看日志
 ./ccenv logs
-
-# 实时跟踪日志
 ./ccenv logs -f
-
-# 查看最后50行日志
-./ccenv logs -n 50
-
-# 显示帮助
-./ccenv help
 ```
-
-**参数透传说明**：
-- `ccenv code` 之后的所有参数都会直接传递给 `claude` 命令
-- `ccenv logs` 之后的所有参数都会直接传递给 `tail` 命令
-- 支持所有 Claude Code 的原生参数和功能
-- 支持所有 tail 命令的参数和选项
-- 支持管道输入和标准输入重定向
 
 ## 📝 配置管理
 
@@ -99,8 +70,9 @@ echo "代码内容" | ./ccenv code "请分析这段代码"
 ```json
 {
   "version": "2.0",
-  "CCENV_HOST": "localhost",
-  "CCENV_PORT": 9999,
+  "CCENV_HOST": "127.0.0.1",
+  "LLM_PROXY_PORT": 9999,
+  "ADMIN_PORT": 9998,
   "API_PROXY": "http://127.0.0.1:7890",
   "LOGGING_LEVEL": "INFO",
   "API_TIMEOUT_MS": 600000,
@@ -133,8 +105,9 @@ echo "代码内容" | ./ccenv code "请分析这段代码"
 ### 配置说明
 
 #### 基础配置
-- `CCENV_HOST`: 代理服务器绑定主机（默认：localhost）
-- `CCENV_PORT`: 代理服务器端口（默认：9999）
+- `CCENV_HOST`: 服务器绑定主机（默认：127.0.0.1）
+- `LLM_PROXY_PORT`: LLM API代理端口（默认：9999）
+- `ADMIN_PORT`: 管理服务端口（默认：9998）
 - `API_PROXY`: HTTP/HTTPS代理设置（可选）
 - `LOGGING_LEVEL`: 日志级别（DEBUG/INFO/WARN/ERROR）
 - `API_TIMEOUT_MS`: API请求超时时间（毫秒）
@@ -151,39 +124,15 @@ echo "代码内容" | ./ccenv code "请分析这段代码"
 - `default`: 按配置顺序故障转移，优先使用第一个可用provider
 - `robin`: 轮询负载均衡，在可用providers间平均分配请求
 
-## 🔧 高级功能
+## 🔧 服务接口
 
-### 模型映射
-自动将Claude Code的模型请求转换为目标服务商支持的模型：
+### LLM API服务 (端口9999)
+- `GET /health` - 健康检查
+- `GET /v1/*` - API代理路由
+- `POST /v1/messages` - Claude消息接口（支持模型映射）
 
-```
-Claude请求: claude-3.5-sonnet
-映射后: deepseek-ai/DeepSeek-V3
-```
-
-### 故障恢复
-- 自动检测provider响应状态
-- 5xx错误自动记录故障
-- 累计5次故障则禁用5分钟
-- 禁用期满自动重新启用
-
-### 配置热重载
-修改配置文件后自动：
-1. 重新加载配置
-2. 重启代理服务
-3. 重置故障计数
-4. 更新日志级别
-
-### API代理支持
-支持通过HTTP/HTTPS代理访问API服务：
-
-```json
-{
-  "API_PROXY": "http://127.0.0.1:7890"
-}
-```
-
-根据URL前缀自动设置相应的环境变量。
+### 管理服务 (端口9998)
+- `GET /` - Web管理界面
 
 ## 📊 监控和日志
 
@@ -197,37 +146,15 @@ Claude请求: claude-3.5-sonnet
 
 # 查看最后50行日志
 ./ccenv logs -n 50
-
-# 支持所有 tail 命令参数
-./ccenv logs -f -n 100
 ```
-
-### HTTP接口
-代理服务器提供以下管理接口：
-
-#### 客户端管理
-- `POST /ccenv/register` - 客户端注册
-- `POST /ccenv/unregister` - 客户端注销
-- `POST /ccenv/heartbeat` - 客户端心跳
-- `GET /ccenv/status` - 查看所有客户端状态
-
-#### 系统监控
-- `GET /health` - 健康检查
-- `GET /v1/` - API代理路由
-- `POST /v1/messages` - Claude消息接口（支持模型映射）
 
 ### 日志输出示例
 ```
-[INFO] EXECUTOR 启动新的透明代理服务...
-[INFO] PROVIDER 初始化 ProviderManager，策略: default，providers 数量: 2
-[INFO] PROVIDER Provider: siliconflow-primary, State: on
-[INFO] PROVIDER Provider: siliconflow-backup, State: off
-[INFO] PROXY 客户端生命周期: [注册] ccenv_hostname_12345_1234567890 -> 总数:1
+[INFO] PROXY 启动服务路由管理器: LLM代理端口=9999, 管理端口=9998
+[INFO] PROXY 启动LLM API服务器: http://127.0.0.1:9999
+[INFO] PROXY 启动管理服务器: http://127.0.0.1:9998
 [INFO] PROXY 模型映射: claude-3-5-sonnet -> deepseek-ai/DeepSeek-V3 (provider: siliconflow-primary)
 [DEBUG] PROXY POST /v1/messages -> 200 (1.2s) [provider: siliconflow-primary]
-[INFO] PROXY 客户端生命周期: [注销] ccenv_hostname_12345_1234567890 -> 剩余:0
-[INFO] EXECUTOR 所有客户端断开，5秒后自动关闭代理服务...
-[INFO] EXECUTOR 确认所有ccenv code客户端已断开，自动关闭代理服务
 ```
 
 ### 配置查看
@@ -238,8 +165,9 @@ Claude请求: claude-3.5-sonnet
 ```
 === Claude Code Env 配置信息 ===
 版本: 2.0
-代理主机: localhost
-代理端口: 9999
+代理主机: 127.0.0.1
+LLM代理端口: 9999
+管理端口: 9998
 日志级别: INFO
 
 === Provider 配置 (2个) ===
@@ -265,81 +193,55 @@ Claude请求: claude-3.5-sonnet
 }
 ```
 
-### 常见错误类型
-- `overloaded_error`: 无可用provider
-- `api_error`: 请求转发失败
-- `invalid_request_error`: 请求格式错误
-
 ### 端口冲突处理
-当端口被占用时，系统会显示详细的进程信息：
+当端口被占用时，系统会显示详细信息：
 
 ```
-错误: 端口 9999 已被占用，无法启动代理服务
-
-占用进程信息:
-  PID: 12345
-  进程: ccenv
-  命令: ./ccenv start
-  用户: username
-
-提示: 检测到已有 ccenv 进程在运行
-  - 使用 'ccenv code' 复用现有代理服务
-  - 或停止现有进程: kill 12345
+错误: 端口 [9999, 9998] 已被占用，无法启动代理服务
+解决方案:
+  1. 修改配置文件中的端口配置 (LLM_PROXY_PORT: 9999, ADMIN_PORT: 9998)
+  2. 或使用 'lsof -i' 查找并停止占用进程
 ```
 
-## 🔨 开发和构建
+## 🔨 项目结构
 
-### 项目结构
 ```
 claude-code-env/
-├── cmd/ccenv/           # 主程序入口
+├── cmd/ccenv/                   # 主程序入口
 ├── internal/
-│   ├── config/          # 配置管理和文件监控
-│   ├── executor/        # 核心执行逻辑
-│   ├── logger/          # 统一日志系统
-│   ├── provider/        # Provider管理和路由
-│   └── proxy/           # HTTP代理服务器
-├── tools/               # 开发工具
-│   ├── build.sh         # 多平台构建脚本
-│   └── debug-claude.sh  # Claude命令调试脚本
-├── dist/                # 构建输出目录
+│   ├── admin/                   # 管理服务器
+│   ├── config/                  # 配置管理和文件监控
+│   ├── executor/                # 核心执行逻辑
+│   ├── llm_proxy/               # LLM API代理服务器
+│   ├── logger/                  # 统一日志系统
+│   ├── provider/                # Provider管理和路由
+│   └── server_routing_manager/  # 服务路由管理器
+├── tools/                       # 开发工具
+│   ├── build.sh                 # 多平台构建脚本
+│   └── debug-claude.sh          # Claude命令调试脚本
 ├── go.mod
 ├── go.sum
 └── README.md
 ```
 
-### 构建命令
+## 🔨 构建
 
-#### 使用构建脚本（推荐）
+### 使用构建脚本（推荐）
 ```bash
 # 构建当前平台版本
 ./tools/build.sh
 
 # 构建所有支持平台
 ./tools/build.sh all
-
-# 构建特定平台
-./tools/build.sh linux
-./tools/build.sh darwin
-./tools/build.sh windows
-
-# 查看构建选项
-./tools/build.sh help
 ```
 
-#### 手动构建
+### 手动构建
 ```bash
 # 开发构建
 go build -o ccenv ./cmd/ccenv
 
 # 生产构建（带版本信息）
 go build -ldflags "-X main.Version=v2.0.0" -o ccenv ./cmd/ccenv
-```
-
-#### 开发调试
-```bash
-# 调试参数传递（在 executor.go 中临时替换 "claude" 为该脚本）
-./tools/debug-claude.sh
 ```
 
 ## 📄 版本历史
@@ -350,20 +252,13 @@ go build -ldflags "-X main.Version=v2.0.0" -o ccenv ./cmd/ccenv
 - ✅ 双认证方式支持
 - ✅ 配置文件热重载
 - ✅ 统一错误处理格式
-- ✅ 完整的监控和日志系统
 - ✅ **参数透传功能** - `ccenv code` 支持将参数完全透传给 Claude Code
-- ✅ **工具脚本整理** - 构建脚本和调试工具移至 `tools/` 目录
-- ✅ **智能端口管理** - 自动检测端口占用，支持代理复用和冲突避免
 - ✅ **日志查看命令** - 新增 `ccenv logs` 命令，支持实时跟踪和参数透传
-- ✅ **客户端生命周期管理** - 自动注册/注销客户端，支持心跳监控和自动清理
-- ✅ **智能进程检测** - 精确识别端口占用进程，区分 ccenv 和其他进程
-- ✅ **自动服务关闭** - 所有客户端断开后自动关闭代理服务，节省资源
-- ✅ **多路由支持** - 扩展 HTTP 路由，支持健康检查、状态查询等接口
+- ✅ **双端口架构** - LLM API服务(9999)和管理服务(9998)完全分离
+- ✅ **Web管理界面** - 提供简洁的Web界面用于服务状态查看
+- ✅ **服务路由管理器** - 统一管理LLM代理和管理服务的生命周期
+- ✅ **架构简化** - 移除复杂的客户端管理，专注于核心代理功能
 - ✅ **日志系统增强** - 新增请求追踪ID、错误调用栈、减少日志噪音
-
-### v1.0.0
-- 基础环境变量传递模式
-- 单一服务商支持
 
 ## 🤝 贡献指南
 

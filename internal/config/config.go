@@ -32,7 +32,8 @@ type Config struct {
 	Version      string     `json:"version"`
 	APIKey       string     `json:"APIKEY"`
 	CCEnvHost    string     `json:"CCENV_HOST"`
-	CCEnvPort    int        `json:"CCENV_PORT"`
+	LLMProxyPort int        `json:"LLM_PROXY_PORT"` // LLM API代理端口
+	AdminPort    int        `json:"ADMIN_PORT"`     // 管理端口
 	APIProxy     string     `json:"API_PROXY"`
 	LoggingLevel string     `json:"LOGGING_LEVEL"`
 	APITimeoutMS int        `json:"API_TIMEOUT_MS"`
@@ -45,7 +46,8 @@ const ExampleConfig = `{
     "version": "2.0",
     "APIKEY": "your-secret-key",
     "CCENV_HOST": "127.0.0.1", 
-    "CCENV_PORT": 9999,
+    "LLM_PROXY_PORT": 9999,
+    "ADMIN_PORT": 9998,
     "API_PROXY": "http://127.0.0.1:7890",
     "LOGGING_LEVEL": "DEBUG",
     "API_TIMEOUT_MS": 600000,
@@ -146,9 +148,19 @@ func (c *Config) SetDefaults() {
 		c.CCEnvHost = "127.0.0.1"
 	}
 
-	// 验证和设置 CCENV_PORT
-	if c.CCEnvPort == 0 || !isValidPort(c.CCEnvPort) {
-		c.CCEnvPort = 9999
+	// 验证和设置 LLM_PROXY_PORT（LLM API代理端口）
+	if c.LLMProxyPort == 0 || !isValidPort(c.LLMProxyPort) {
+		c.LLMProxyPort = 9999
+	}
+
+	// 验证和设置 ADMIN_PORT（管理端口）
+	if c.AdminPort == 0 || !isValidPort(c.AdminPort) {
+		c.AdminPort = 9998
+	}
+
+	// 确保两个端口不冲突
+	if c.LLMProxyPort == c.AdminPort {
+		c.AdminPort = c.LLMProxyPort - 1 // 管理端口默认比API端口小1
 	}
 
 	if c.LoggingLevel == "" {
@@ -316,7 +328,8 @@ func (c *Config) DisplayConfig() {
 	fmt.Println("=== Claude Code Env 配置信息 ===")
 	fmt.Printf("版本: %s\n", c.Version)
 	fmt.Printf("代理主机: %s\n", c.CCEnvHost)
-	fmt.Printf("代理端口: %d\n", c.CCEnvPort)
+	fmt.Printf("LLM代理端口: %d\n", c.LLMProxyPort)
+	fmt.Printf("管理端口: %d\n", c.AdminPort)
 	fmt.Printf("日志级别: %s\n", c.LoggingLevel)
 	fmt.Printf("API超时: %dms\n", c.APITimeoutMS)
 
